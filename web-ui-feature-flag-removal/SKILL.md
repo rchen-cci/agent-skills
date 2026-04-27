@@ -99,8 +99,8 @@ In unit test files (`*.test.tsx`):
 
 ```bash
 cd web-ui
-pnpm typecheck
-pnpm lint:fix && pnpm lint
+pnpm lint:fix
+pnpm format:fix
 ```
 
 Fix any remaining errors before proceeding.
