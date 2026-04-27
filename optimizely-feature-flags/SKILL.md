@@ -139,9 +139,12 @@ Before outputting results, detect the user's intent from their message:
 
 | Intent signals | Mode |
 |----------------|------|
-| "audit", "show me", "which flags", "list", "what's fully on", no explicit action | **Mode 1: Audit** — output the table with copy links |
-| "remove all", "clean up all", "remove them", "run cleanup", "do it", "fix them all" | **Mode 2: Bulk Cleanup** — launch subagents |
+| "audit", "show me", "which flags", "list", "what's fully on", no explicit action | **Mode 1: Audit** — output the table |
+| "remove all", "clean up all", "remove them", "run cleanup", "do it", "fix them all" | **Mode 2: Bulk Cleanup** — launch one subagent per flag in parallel |
+| "remove `<flag>`", "clean up `<flag>`", "run cleanup for `<flag>`", names a specific flag key | **Mode 3: Single Flag** — launch one subagent for that flag |
 | Ambiguous | Default to **Mode 1**, then ask at the end: *"Want me to launch cleanup agents for all of these?"* |
+
+**Mode 3 can be triggered after an audit.** If the user has already seen the audit table and then says something like "remove deploy_pipeline" or "do the first one", resolve the flag key from the prior audit results and proceed as Mode 3.
 
 ---
 
@@ -152,44 +155,23 @@ After filtering confirmed matches, output a markdown table. Each row gets a clip
 Use this Python snippet to generate the table after collecting `flag_files` (a dict of `flag_key -> [file_path, ...]`) and `existing_prs` (from the PR-check step above):
 
 ```python
-from urllib.parse import quote
-
-def make_prompt(flag_key):
-    return (
-        f"Remove the '{flag_key}' feature flag from the codebase. "
-        f"It is fully ON in production for all users (100% rollout, all rules). "
-        f"Use the feature-flag-removal skill if available: inline the enabled code path "
-        f"and delete all gating logic and the useFeatureFlag call."
-    )
-
-def make_copy_link(flag_key):
-    prompt = make_prompt(flag_key)
-    # javascript: URI that copies the prompt text to the clipboard when clicked
-    js = f"navigator.clipboard.writeText({repr(prompt)})"
-    return f"javascript:{quote(js)}"
-
-print("| Flag | Files | Status | Action |")
-print("|------|-------|--------|--------|")
+print("| Flag | Files | Status |")
+print("|------|-------|--------|")
 for flag, files in sorted(flag_files.items()):
     file_list = "<br>".join(f"`{f}`" for f in files)
     pr = existing_prs.get(flag)
     if pr:
         status = f"[PR #{pr['number']} open]({pr['url']})"
-        action = "_(PR already open)_"
     else:
         status = "ready"
-        link = make_copy_link(flag)
-        action = f"[Copy prompt]({link})"
-    print(f"| `{flag}` | {file_list} | {status} | {action} |")
+    print(f"| `{flag}` | {file_list} | {status} |")
 ```
 
 Example output row:
-| Flag | Files | Status | Action |
-|------|-------|--------|--------|
-| `deploy_pipeline` | `project-home/components/environments/EnvironmentList.tsx`<br>`deploys/component/releases/ReleaseActions/index.tsx` | ready | [Copy prompt](javascript:navigator.clipboard.writeText("Remove%20the%20'deploy_pipeline'%20feature%20flag%20from%20the%20codebase.%20It%20is%20fully%20ON%20in%20production%20for%20all%20users%20(100%25%20rollout%2C%20all%20rules).%20Use%20the%20feature-flag-removal%20skill%20if%20available%3A%20inline%20the%20enabled%20code%20path%20and%20delete%20all%20gating%20logic%20and%20the%20useFeatureFlag%20call.")) |
-| `some_other_flag` | `src/components/Foo.tsx` | [PR #1234 open](https://github.com/...) | _(PR already open)_ |
-
-Click **Copy prompt** to copy the pre-filled cleanup instruction to your clipboard, then paste it into a new Cursor agent chat.
+| Flag | Files | Status |
+|------|-------|--------|
+| `deploy_pipeline` | `project-home/components/environments/EnvironmentList.tsx`<br>`deploys/component/releases/ReleaseActions/index.tsx` | ready |
+| `some_other_flag` | `src/components/Foo.tsx` | [PR #1234 open](https://github.com/...) |
 
 ---
 
@@ -268,6 +250,25 @@ After all `Task` calls are issued, tell the user:
 
 If any flags were skipped, append:
 > "Skipped {skipped_count} flag(s) with PRs already open: `flag_a`, `flag_b`."
+
+---
+
+## Mode 3: Single flag cleanup
+
+When the user names a specific flag (either before or after an audit), launch **one subagent** for that flag only.
+
+**Steps:**
+1. Resolve `flag_key` from the user's message (exact key, or infer from context if they said "the first one", "the deploy_pipeline one", etc.).
+2. Look up `flag_files[flag_key]` from the audit results. If the audit hasn't been run yet, run it first (fetch datafile + grep), then proceed.
+3. Check `existing_prs` for that flag. If a PR is already open:
+   > "There's already an open PR for `<flag_key>`: [PR #N](<url>). No agent launched."
+4. Otherwise, launch a single `Task` call:
+   - `subagent_type`: `"best-of-n-runner"`
+   - `run_in_background`: `true`
+   - `description`: `"Remove <flag_key> feature flag"`
+   - Use the same prompt template from Mode 2, filled in for this one flag.
+5. Confirm to the user:
+   > "Launched cleanup agent for `<flag_key>`. It will create a branch and open a PR — check the background terminals for progress."
 
 ## Notes
 
